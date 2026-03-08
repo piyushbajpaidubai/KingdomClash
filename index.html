@@ -389,11 +389,28 @@ function tickTowers(g,dt){
     if(t.oc>0)t.oc-=dt;
     const spd=t.oc>0?cfg.speed*0.5:cfg.speed;
     let tgt=null,md=Infinity;
-    for(const e of g.enemies){const d=dist({x:t.x,y:t.y},{x:e.x,y:e.y});if(d<=cfg.range*CELL&&d<md){md=d;tgt=e;}}
+    // Towers only attack ENEMY critters:
+    // P1 towers defend vs rl critters (P2's critters heading to P1 castle)
+    // P2 towers defend vs lr critters (P1's critters heading to P2 castle)
+    // Neutral (free zone) towers attack ALL critters
+    const towerCol = Math.floor(t.cx !== undefined ? t.cx : t.x/CELL);
+    const isNeutral = towerCol>=8 && towerCol<=11;
+    for(const e of g.enemies){
+      if(!isNeutral){
+        if(t.owner==="p1" && e.dir!=="rl") continue; // P1 tower only attacks rl (P2's critters)
+        if(t.owner==="p2" && e.dir!=="lr") continue; // P2 tower only attacks lr (P1's critters)
+      }
+      const d=dist({x:t.x,y:t.y},{x:e.x,y:e.y});if(d<=cfg.range*CELL&&d<md){md=d;tgt=e;}
+    }
     if(!tgt) continue;
     t.cd=spd;
     if(cfg.splash){
-      g.enemies.forEach(e=>{if(dist({x:t.x,y:t.y},{x:e.x,y:e.y})<=cfg.range*CELL){e.hp-=cfg.dmg;addFloat(g,e.x,e.y,"💤 Zzz!","#ce93d8");}});
+      g.enemies.forEach(e=>{
+        if(!isNeutral){
+          if(t.owner==="p1" && e.dir!=="rl") return;
+          if(t.owner==="p2" && e.dir!=="lr") return;
+        }
+        if(dist({x:t.x,y:t.y},{x:e.x,y:e.y})<=cfg.range*CELL){e.hp-=cfg.dmg;addFloat(g,e.x,e.y,"💤 Zzz!","#ce93d8");}});
       addFloat(g,t.x,t.y,"🏜️ Poof!","#D4A017");
     } else {
       g.projectiles.push({id:uid(),x:t.x,y:t.y,tx:tgt.x,ty:tgt.y,tid:tgt.id,spd:360,dmg:cfg.dmg,col:cfg.color,slow:cfg.slow,chain:t.type==="falcon"?2:0,type:t.type});
