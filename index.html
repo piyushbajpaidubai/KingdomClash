@@ -55,36 +55,28 @@ const SLOTH_EMOJI = "🐫";
 const SNOOZE_MESSAGES = ["يسلم! (Yislam)","Yalla bye 😴","Inshallah Zzz…","Habibi, nap time!","💤 Marhaba nap!","Khalas! So sleepy…","😴 Sahu ya habibi!"];
 
 // ── RANDOM PATH GENERATOR ──────────────────────────────────────────────
+// Generates a guaranteed non-overlapping S-curve path from x=0 to x=COLS-1.
+// Waypoints use strictly increasing x columns so segments NEVER cross.
 const buildRandomPath = () => {
-  const midTop=()=>1+Math.floor(Math.random()*4);
-  const midBot=()=>7+Math.floor(Math.random()*4);
-  const startY=3+Math.floor(Math.random()*6);
-  const endY=3+Math.floor(Math.random()*6);
-  const numTurns=3+Math.floor(Math.random()*2);
-  const xStep=Math.floor(COLS/(numTurns+1));
-  let goTop=Math.random()<0.5;
-  const wps=[{x:0,y:startY}];
-  for(let i=1;i<=numTurns;i++){
-    const wx=i*xStep;
-    const wy=goTop?midTop():midBot();
-    wps.push({x:wx,y:wy});
-    goTop=!goTop;
-  }
-  wps.push({x:COLS-1,y:endY});
-  const path=[];
-  const seen=new Set();
-  for(let i=0;i<wps.length-1;i++){
+  const TOP = () => 1 + Math.floor(Math.random() * 3);  // rows 1-3
+  const BOT = () => 7 + Math.floor(Math.random() * 3);  // rows 7-9
+  const MID = () => 4 + Math.floor(Math.random() * 3);  // rows 4-6
+  const startY = MID(), endY = MID();
+  let goTop = Math.random() < 0.5;
+  // 4 interior waypoints at fixed x=4,8,12,16 — strictly increasing, no overlap
+  const wps = [{x:0,y:startY}];
+  for (const wx of [4,8,12,16]) { wps.push({x:wx, y:goTop?TOP():BOT()}); goTop=!goTop; }
+  wps.push({x:COLS-1, y:endY});
+  // Expand: horizontal then vertical per segment (no crossing guaranteed)
+  const path = [];
+  for (let i=0;i<wps.length-1;i++){
     const a=wps[i],b=wps[i+1];
-    if(a.x===b.x){
-      const s=a.y<b.y?1:-1;
-      for(let y=a.y;y!==b.y;y+=s){const k=`${a.x},${y}`;if(!seen.has(k)){seen.add(k);path.push({x:a.x,y});}}
-    } else {
-      const s=a.x<b.x?1:-1;
-      for(let x=a.x;x!==b.x;x+=s){const k=`${x},${a.y}`;if(!seen.has(k)){seen.add(k);path.push({x,y:a.y});}}
-    }
+    const sx=a.x<b.x?1:-1;
+    for(let x=a.x;x!==b.x;x+=sx) path.push({x,y:a.y});
+    const sy=a.y<b.y?1:-1;
+    for(let y=a.y;y!==b.y;y+=sy) path.push({x:b.x,y});
   }
-  const last=wps[wps.length-1];
-  if(!seen.has(`${last.x},${last.y}`))path.push(last);
+  path.push(wps[wps.length-1]);
   return path;
 };
 
@@ -223,8 +215,10 @@ function Game({players,onEnd}) {
     heroPhase:false,p1heroChosen:false,p2heroChosen:false,
     selectedTower:{p1:"date",p2:"date"},
     activeTurn:"p1",tick:0,ended:false,
-    pathLR:buildRandomPath(),get pathRL(){return [...this.pathLR].reverse();},
+    pathLR:buildRandomPath(),pathRL:[],
   });
+  // Initialize pathRL on first render (can't use self-reference in useRef literal)
+  if(!gsRef.current.pathRL.length) gsRef.current.pathRL = [...gsRef.current.pathLR].reverse();
   const canvasRef=useRef(null);
   const animRef=useRef(null);
   const lastRef=useRef(0);
@@ -350,7 +344,7 @@ function startWave(g){
     }
   });
   g.spawnQueue.sort(()=>Math.random()-0.5);
-  g.spawnTimer=0;
+  g.spawnTimer=-0.5; // negative = spawn first critter immediately
 }
 
 function tickEnemies(g,dt){
