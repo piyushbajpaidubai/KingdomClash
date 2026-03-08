@@ -1,0 +1,709 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// Load Boogaloo font globally
+const _fontLink = (() => {
+  if (typeof document !== "undefined") {
+    const l = document.createElement("link");
+    l.rel = "stylesheet";
+    l.href = "https://fonts.googleapis.com/css2?family=Boogaloo&family=Fredoka+One&display=swap";
+    document.head.appendChild(l);
+  }
+})();
+
+// ─── UAE THEME CONSTANTS ──────────────────────────────────────────────────────
+const COLS = 20, ROWS = 12, CELL = 42;
+const W = COLS * CELL, H = ROWS * CELL;
+
+// UAE Emirates (7 total - player picks one each)
+const EMIRATES = [
+  { name:"Dubai",          flag:"🏙️", color:"#C8102E", desc:"City of the Future",     ruler:"Sheikh of Dubai"     },
+  { name:"Abu Dhabi",      flag:"🕌", color:"#006400", desc:"Capital of the UAE",      ruler:"Sheikh of Abu Dhabi" },
+  { name:"Sharjah",        flag:"🎨", color:"#4a90d9", desc:"Cultural Capital",        ruler:"Sheikh of Sharjah"   },
+  { name:"Ras Al Khaimah", flag:"⛰️", color:"#8B4513", desc:"Land of Mountains",      ruler:"Sheikh of RAK"       },
+  { name:"Ajman",          flag:"🌊", color:"#20B2AA", desc:"Pearl of the Emirates",   ruler:"Sheikh of Ajman"     },
+  { name:"Fujairah",       flag:"🌿", color:"#2E8B57", desc:"Gateway to the East",     ruler:"Sheikh of Fujairah"  },
+  { name:"Umm Al Quwain", flag:"🐟", color:"#9B59B6", desc:"Land of Two Waters",      ruler:"Sheikh of UAQ"       },
+];
+
+// UAE Free Zones (neutral territory)
+const FREE_ZONES = ["JAFZA","DIFC","D3","ADGM","SAIF Zone","KIZAD","RAK FTZ"];
+
+// Towers — UAE / Arabic themed, still silly (shoot dates, sand, falcons etc.)
+const TOWERS = {
+  date:    { emoji:"🌴", name:"Date Palm",   cost:50,  dmg:18, range:3,   speed:800,  color:"#8BC34A", splash:false, slow:0,   desc:"Flings dates! Yummy Zzz!" },
+  sandstorm:{ emoji:"🏜️", name:"Sand Storm", cost:80,  dmg:40, range:2.5, speed:1800, color:"#D4A017", splash:true,  slow:0,   desc:"Sleepy sandstorm! Poof!" },
+  oud:     { emoji:"🎶", name:"Oud Music",   cost:70,  dmg:5,  range:2.5, speed:1200, color:"#f48fb1", splash:false, slow:0.5, desc:"Beautiful music slows them!" },
+  falcon:  { emoji:"🦅", name:"Falcon",      cost:90,  dmg:25, range:3.5, speed:1000, color:"#FFD700", splash:false, slow:0,   desc:"Falcon swoops between critters!" },
+  dune:    { emoji:"🏔️", name:"Sand Dune",   cost:30,  dmg:0,  range:0,   speed:0,    color:"#e0c080", splash:false, slow:0,   desc:"Redirects critters around it!" },
+};
+
+// Critters — desert animals that get snoozified
+const ENEMY_TYPES = [
+  { emoji:"🐪", hp:60,  speed:1.1,  reward:8,  name:"Camel"    },
+  { emoji:"🦎", hp:120, speed:0.85, reward:12, name:"Lizard"   },
+  { emoji:"🐐", hp:200, speed:0.55, reward:20, name:"Mountain Goat" },
+  { emoji:"🦁", hp:400, speed:0.6,  reward:40, name:"Desert Lion" },
+];
+const SLOTH_EMOJI = "🐫"; // sleeping camel (tucked-in camel = snoozing camel!)
+const SNOOZE_MESSAGES = ["يسلم! (Yislam)","Yalla bye 😴","Inshallah Zzz…","Habibi, nap time!","💤 Marhaba nap!","Khalas! So sleepy…","😴 Sahu ya habibi!"];
+
+// Desert sand path
+const buildPath = () => {
+  const wps = [
+    {x:0,y:5},{x:3,y:5},{x:3,y:2},{x:7,y:2},
+    {x:7,y:9},{x:11,y:9},{x:11,y:3},{x:15,y:3},
+    {x:15,y:8},{x:19,y:8},{x:19,y:5},
+  ];
+  const path = [];
+  for (let i=0;i<wps.length-1;i++) {
+    const a=wps[i], b=wps[i+1];
+    if (a.x===b.x){ const s=a.y<b.y?1:-1; for(let y=a.y;y!==b.y;y+=s) path.push({x:a.x,y}); }
+    else           { const s=a.x<b.x?1:-1; for(let x=a.x;x!==b.x;x+=s) path.push({x,y:a.y}); }
+  }
+  path.push(wps[wps.length-1]);
+  return path;
+};
+const PATH = buildPath();
+const PATH_SET = new Set(PATH.map(p=>`${p.x},${p.y}`));
+const CASTLE_L = {x:0,y:5};
+const CASTLE_R = {x:19,y:5};
+
+const WAVES = [
+  [{t:0,n:5,i:1200}],
+  [{t:0,n:6,i:1000},{t:1,n:2,i:2000}],
+  [{t:0,n:8,i:900},{t:1,n:4,i:1500}],
+  [{t:1,n:6,i:1100},{t:2,n:2,i:2500}],
+  [{t:0,n:10,i:800},{t:1,n:5,i:1200},{t:2,n:3,i:2000}],
+  [{t:1,n:8,i:1000},{t:2,n:4,i:1800},{t:3,n:1,i:4000}],
+  [{t:2,n:6,i:1200},{t:3,n:2,i:3000}],
+  [{t:0,n:15,i:600},{t:1,n:8,i:900},{t:2,n:5,i:1500},{t:3,n:3,i:3000}],
+];
+
+const uid = () => Math.random().toString(36).slice(2,9);
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+
+// Ruler powers — UAE themed
+const RULER_POWERS = [
+  {id:"goldrush",   emoji:"🛢️", name:"Oil Boom!",      desc:"+80 dirhams rain from the sky!"},
+  {id:"overclock",  emoji:"🦅", name:"Falcon Army",    desc:"Your falcons fly 2x faster (15s)!"},
+  {id:"freeze_all", emoji:"🌙", name:"Desert Night",   desc:"Night falls! All critters nap (6s)!"},
+  {id:"fortress",   emoji:"🏔️", name:"Sand Dune Wall", desc:"3 Sand Dunes appear instantly!"},
+  {id:"strike",     emoji:"🌊", name:"Gulf Wave",      desc:"A big Gulf wave snoozifies all center critters!"},
+  {id:"tornado",    emoji:"🌪️", name:"Shamal Wind",    desc:"Shamal wind spins critters dizzy for 5s!"},
+];
+
+// ─── ROOT ─────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [screen, setScreen] = useState("splash");
+  const [players, setPlayers] = useState({
+    p1:{name:"Dubai", emirate:0, color:"#C8102E"},
+    p2:{name:"Abu Dhabi", emirate:1, color:"#006400"},
+  });
+  const [result, setResult] = useState(null);
+
+  if (screen==="splash")  return <Splash  onStart={()=>setScreen("setup")} />;
+  if (screen==="setup")   return <Setup   players={players} setPlayers={setPlayers} onStart={()=>setScreen("game")} />;
+  if (screen==="game")    return <Game    players={players} onEnd={(r)=>{setResult(r);setScreen("results");}} />;
+  if (screen==="results") return <Results result={result} players={players} onRematch={()=>setScreen("game")} onMenu={()=>setScreen("splash")} />;
+}
+
+// ─── SPLASH ───────────────────────────────────────────────────────────────────
+function Splash({onStart}) {
+  const [t,setT]=useState(0);
+  useEffect(()=>{const id=setInterval(()=>setT(x=>x+1),80);return()=>clearInterval(id);},[]);
+  const stars=useRef(Array.from({length:60},()=>({x:Math.random()*100,y:Math.random()*100,s:0.5+Math.random()*2,p:Math.random()*Math.PI*2}))).current;
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(180deg,#0a0500 0%,#1a0e00 60%,#0d1500 100%)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"Boogaloo,cursive",overflow:"hidden",position:"relative"}}>
+      {/* Stars */}
+      {stars.map((s,i)=><div key={i} style={{position:"absolute",left:`${s.x}%`,top:`${s.y}%`,width:s.s,height:s.s,borderRadius:"50%",background:"#fffde0",opacity:0.15+0.55*Math.abs(Math.sin(t/28+s.p)),pointerEvents:"none"}}/>)}
+      {/* Desert glow */}
+      <div style={{position:"absolute",bottom:0,left:0,right:0,height:"30%",background:"radial-gradient(ellipse at bottom,#D4A01722,transparent 70%)",pointerEvents:"none"}}/>
+      <div style={{position:"absolute",left:"8%",top:"20%",width:300,height:300,borderRadius:"50%",background:"radial-gradient(#C8102E12,transparent 70%)",pointerEvents:"none"}}/>
+      <div style={{position:"absolute",right:"8%",top:"20%",width:300,height:300,borderRadius:"50%",background:"radial-gradient(#00640012,transparent 70%)",pointerEvents:"none"}}/>
+
+      {/* Moon */}
+      <div style={{position:"absolute",top:30,right:"15%",fontSize:40,opacity:0.7,filter:"drop-shadow(0 0 12px #fffde0)"}}>🌙</div>
+
+      {/* UAE flag strip */}
+      <div style={{display:"flex",gap:0,marginBottom:24,borderRadius:8,overflow:"hidden",boxShadow:"0 4px 20px #0008",width:260,height:10}}>
+        <div style={{flex:1,background:"#C8102E"}}/>
+        <div style={{flex:1,background:"#fff"}}/>
+        <div style={{flex:1,background:"#000"}}/>
+        <div style={{width:60,background:"#007A3D"}}/>
+      </div>
+
+      {/* Mosques */}
+      <div style={{display:"flex",gap:80,alignItems:"flex-end",marginBottom:16}}>
+        <div style={{fontSize:56,filter:"drop-shadow(0 0 16px #C8102E88)",transform:`translateY(${Math.sin(t/20)*4}px)`}}>🕌</div>
+        <div style={{fontSize:36,filter:"drop-shadow(0 0 20px #FFD700aa)",transform:`scale(${1+Math.sin(t/14)*0.06})`}}>🦅</div>
+        <div style={{fontSize:56,filter:"drop-shadow(0 0 16px #00640088)",transform:`translateY(${Math.sin(t/20+1.5)*4}px)`}}>🕌</div>
+      </div>
+
+      {/* Title */}
+      <div style={{fontSize:13,color:"#D4A017",letterSpacing:6,marginBottom:6,textTransform:"uppercase"}}>مملكة الإمارات — UAE Emirates</div>
+      <div style={{fontSize:52,fontWeight:900,letterSpacing:5,transform:"rotate(-1.5deg)",display:"inline-block",background:"linear-gradient(135deg,#C8102E,#FFD700,#007A3D)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:4,textAlign:"center"}}>KINGDOM CLASH</div>
+      <div style={{color:"#666",fontSize:13,letterSpacing:3,marginBottom:36}}>SILLY TOWER DEFENSE · 7 EMIRATES · AGES 8+ 🐫</div>
+
+      {/* Feature pills */}
+      <div style={{display:"flex",gap:10,marginBottom:40,flexWrap:"wrap",justifyContent:"center",maxWidth:500}}>
+        {[["🕌","7 Emirates"],["🌴","UAE Towers"],["🐪","Desert Critters"],["🛢️","Oil Dirhams"],["🦅","Falcon Powers"],["🏗️","Free Zone Neutral"]].map(([e,l])=>(
+          <div key={l} style={{background:"rgba(212,160,23,0.08)",border:"1px solid rgba(212,160,23,0.2)",borderRadius:20,padding:"6px 14px",textAlign:"center",display:"flex",alignItems:"center",gap:6}}>
+            <span style={{fontSize:16}}>{e}</span>
+            <span style={{fontSize:10,color:"#a8860a",whiteSpace:"nowrap"}}>{l}</span>
+          </div>
+        ))}
+      </div>
+
+      <button onClick={onStart} style={{background:"linear-gradient(135deg,#C8102E,#FFD700)",border:"none",borderRadius:16,padding:"16px 56px",fontSize:20,fontWeight:900,cursor:"pointer",color:"#000",letterSpacing:2,boxShadow:"0 0 40px #C8102E55",transform:`scale(${1+Math.sin(t/14)*0.03})`,fontFamily:"Boogaloo,cursive"}}>
+        🦅 YALLA! START
+      </button>
+      <div style={{color:"#2a2000",fontSize:11,marginTop:14}}>Hot-seat 2-player · One screen · Inshallah you win!</div>
+    </div>
+  );
+}
+
+// ─── SETUP ────────────────────────────────────────────────────────────────────
+function Setup({players,setPlayers,onStart}) {
+  const update=(p,k,v)=>setPlayers(prev=>({...prev,[p]:{...prev[p],[k]:v,...(k==="emirate"?{name:EMIRATES[v].name,color:EMIRATES[v].color}:{})}}));
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(180deg,#0a0500,#1a0e00)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"Boogaloo,cursive",color:"#fff",padding:20}}>
+      <div style={{fontSize:11,color:"#D4A017",letterSpacing:5,marginBottom:8}}>اختر إمارتك — CHOOSE YOUR EMIRATE</div>
+      <div style={{fontSize:28,fontWeight:900,letterSpacing:3,marginBottom:4,background:"linear-gradient(135deg,#C8102E,#FFD700,#007A3D)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>PICK YOUR KINGDOM</div>
+      <div style={{color:"#555",fontSize:12,marginBottom:32}}>Each emirate is a kingdom — may the best ruler win! 🦅</div>
+
+      <div style={{display:"flex",gap:32,flexWrap:"wrap",justifyContent:"center"}}>
+        {[["p1","🔴 PLAYER 1 — حاكم"],["p2","🟢 PLAYER 2 — حاكم"]].map(([pid,label])=>{
+          const pl=players[pid];
+          const em=EMIRATES[pl.emirate];
+          return(
+            <div key={pid} style={{background:`${em.color}11`,border:`2px solid ${em.color}44`,borderRadius:20,padding:22,minWidth:240,textAlign:"center",transition:"border-color 0.3s"}}>
+              <div style={{fontSize:11,fontWeight:700,color:em.color,letterSpacing:3,marginBottom:14}}>{label}</div>
+              <div style={{fontSize:52,marginBottom:4}}>{em.flag}</div>
+              <div style={{fontSize:18,fontWeight:900,color:"#FFD700",marginBottom:2}}>{em.name}</div>
+              <div style={{fontSize:11,color:"#666",marginBottom:16,fontStyle:"italic"}}>{em.desc}</div>
+              {/* Emirate picker grid */}
+              <div style={{display:"flex",flexWrap:"wrap",gap:6,justifyContent:"center",marginBottom:4}}>
+                {EMIRATES.map((e,i)=>{
+                  const taken=pid==="p1"?players.p2.emirate===i:players.p1.emirate===i;
+                  return(
+                    <button key={i} onClick={()=>!taken&&update(pid,"emirate",i)} style={{
+                      fontSize:20,padding:"5px 8px",borderRadius:10,cursor:taken?"not-allowed":"pointer",opacity:taken?0.25:1,
+                      background:pl.emirate===i?`${e.color}44`:"rgba(255,255,255,0.05)",
+                      border:pl.emirate===i?`2px solid ${e.color}`:"2px solid transparent",
+                      title:e.name,transition:"all 0.15s",
+                    }} title={e.name}>{e.flag}</button>
+                  );
+                })}
+              </div>
+              <div style={{fontSize:9,color:"#444",marginBottom:12}}>← tap emirate flag above</div>
+              <input value={pl.name} onChange={e=>update(pid,"name",e.target.value.slice(0,16))} style={{background:"rgba(255,255,255,0.06)",border:`1px solid ${em.color}44`,borderRadius:10,padding:"9px 14px",color:"#fff",fontSize:13,width:"100%",boxSizing:"border-box",textAlign:"center",fontFamily:"Boogaloo,cursive",outline:"none"}} placeholder="Ruler name..."/>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Free zones notice */}
+      <div style={{marginTop:28,background:"rgba(212,160,23,0.08)",border:"1px solid rgba(212,160,23,0.2)",borderRadius:14,padding:"12px 24px",textAlign:"center",maxWidth:480}}>
+        <div style={{fontSize:12,color:"#D4A017",fontWeight:700,marginBottom:4}}>🏗️ FREE ZONE NEUTRAL TERRITORY</div>
+        <div style={{fontSize:10,color:"#666"}}>The center of the map is the free zone — both rulers can build towers there! ({FREE_ZONES.slice(0,4).join(" · ")}…)</div>
+      </div>
+
+      <button onClick={onStart} style={{marginTop:32,background:"linear-gradient(135deg,#C8102E,#FFD700)",border:"none",borderRadius:14,padding:"14px 52px",fontSize:17,fontWeight:900,cursor:"pointer",color:"#000",letterSpacing:2,boxShadow:"0 6px 30px #C8102E55",fontFamily:"Boogaloo,cursive"}}>
+        🦅 BEGIN — يلا!
+      </button>
+    </div>
+  );
+}
+
+// ─── GAME SCREEN ──────────────────────────────────────────────────────────────
+function Game({players,onEnd}) {
+  const gsRef=useRef({
+    p1hp:100,p2hp:100,p1gold:160,p2gold:160,
+    towers:[],enemies:[],projectiles:[],floaties:[],
+    wave:-1,spawnQueue:[],spawnTimer:0,
+    phase:"prep",prepTimer:0,betweenTimer:0,
+    heroPhase:false,p1heroChosen:false,p2heroChosen:false,
+    selectedTower:{p1:"date",p2:"date"},
+    activeTurn:"p1",tick:0,ended:false,
+  });
+  const canvasRef=useRef(null);
+  const animRef=useRef(null);
+  const lastRef=useRef(0);
+
+  const [snap,setSnap]=useState({
+    p1hp:100,p2hp:100,p1gold:160,p2gold:160,
+    wave:0,maxWave:WAVES.length,phase:"prep",
+    prepCD:5,betweenCD:4,heroPhase:false,
+    p1heroChosen:false,p2heroChosen:false,
+    selectedTower:{p1:"date",p2:"date"},activeTurn:"p1",
+  });
+
+  const pushSnap=useCallback(()=>{
+    const g=gsRef.current;
+    setSnap({
+      p1hp:Math.max(0,Math.round(g.p1hp)),p2hp:Math.max(0,Math.round(g.p2hp)),
+      p1gold:g.p1gold,p2gold:g.p2gold,
+      wave:g.wave+1,maxWave:WAVES.length,phase:g.phase,
+      prepCD:Math.max(0,Math.ceil(5-g.prepTimer)),
+      betweenCD:Math.max(0,Math.ceil((g.heroPhase?20:4)-g.betweenTimer)),
+      heroPhase:g.heroPhase,p1heroChosen:g.p1heroChosen,p2heroChosen:g.p2heroChosen,
+      selectedTower:{...g.selectedTower},activeTurn:g.activeTurn,
+    });
+  },[]);
+
+  useEffect(()=>{
+    const loop=(ts)=>{
+      const dt=Math.min((ts-lastRef.current)/1000,0.1);
+      lastRef.current=ts;
+      const g=gsRef.current;
+      if(g.ended){animRef.current=requestAnimationFrame(loop);return;}
+      g.tick++;
+      if(g.phase==="prep"){g.prepTimer+=dt;if(g.prepTimer>=5)startWave(g);}
+      if(g.phase==="wave"){
+        if(g.spawnQueue.length>0){g.spawnTimer-=dt;if(g.spawnTimer<=0){const s=g.spawnQueue.shift();g.enemies.push({id:uid(),ti:s.t,hp:ENEMY_TYPES[s.t].hp,maxHp:ENEMY_TYPES[s.t].hp,speed:ENEMY_TYPES[s.t].speed,reward:ENEMY_TYPES[s.t].reward,pi:0,x:PATH[0].x*CELL+CELL/2,y:PATH[0].y*CELL+CELL/2,frozen:0,stunned:0,slowT:0});g.spawnTimer=s.i/1000;}}
+        tickEnemies(g,dt);tickTowers(g,dt);tickProjectiles(g,dt);
+        if(g.spawnQueue.length===0&&g.enemies.length===0){g.heroPhase=g.wave===3;g.p1heroChosen=false;g.p2heroChosen=false;g.phase="between";g.betweenTimer=0;g.p1gold+=25+g.wave*5;g.p2gold+=25+g.wave*5;addFloat(g,W/2,60,`🛢️ +${25+g.wave*5} dirhams! Wave clear!`,"#FFD700");}
+        if(g.p1hp<=0||g.p2hp<=0){g.ended=true;const w=g.p1hp>g.p2hp?"p1":"p2";setTimeout(()=>onEnd({winner:w,p1hp:Math.max(0,Math.round(g.p1hp)),p2hp:Math.max(0,Math.round(g.p2hp))}),1200);}
+      }
+      if(g.phase==="between"){g.betweenTimer+=dt;const dur=g.heroPhase?20:4;if(g.betweenTimer>=dur){g.heroPhase=false;if(g.wave+1>=WAVES.length){g.ended=true;const w=g.p1hp>g.p2hp?"p1":"p2";setTimeout(()=>onEnd({winner:w,p1hp:Math.max(0,Math.round(g.p1hp)),p2hp:Math.max(0,Math.round(g.p2hp))}),800);}else startWave(g);}}
+      tickFloaties(g,dt);
+      draw(g,canvasRef.current,players);
+      pushSnap();
+      animRef.current=requestAnimationFrame(loop);
+    };
+    animRef.current=requestAnimationFrame(loop);
+    return()=>cancelAnimationFrame(animRef.current);
+  },[pushSnap,onEnd,players]);
+
+  const handleClick=useCallback((e)=>{
+    const g=gsRef.current;
+    if(g.ended||g.heroPhase) return;
+    const rect=canvasRef.current.getBoundingClientRect();
+    const sx=W/rect.width,sy=H/rect.height;
+    const cx=Math.floor((e.clientX-rect.left)*sx/CELL);
+    const cy=Math.floor((e.clientY-rect.top)*sy/CELL);
+    if(cx<0||cx>=COLS||cy<0||cy>=ROWS) return;
+    const key=`${cx},${cy}`;
+    if(PATH_SET.has(key)) return;
+    if(key===`${CASTLE_L.x},${CASTLE_L.y}`||key===`${CASTLE_R.x},${CASTLE_R.y}`) return;
+    if(g.towers.find(t=>t.cx===cx&&t.cy===cy)) return;
+    const turn=g.activeTurn;
+    const zone=cx<8?"p1":cx>11?"p2":"neutral";
+    if(zone!=="neutral"&&zone!==turn) return;
+    const tcfg=TOWERS[g.selectedTower[turn]];
+    const gold=turn==="p1"?g.p1gold:g.p2gold;
+    if(gold<tcfg.cost) return;
+    if(turn==="p1")g.p1gold-=tcfg.cost;else g.p2gold-=tcfg.cost;
+    g.towers.push({id:uid(),cx,cy,type:g.selectedTower[turn],owner:turn,cd:0,x:cx*CELL+CELL/2,y:cy*CELL+CELL/2,oc:0});
+    addFloat(g,cx*CELL+CELL/2,cy*CELL+CELL/2,`-${tcfg.cost}💰`,turn==="p1"?players.p1.color:players.p2.color);
+    g.activeTurn=turn==="p1"?"p2":"p1";
+    pushSnap();
+  },[pushSnap,players]);
+
+  const applyPower=useCallback((player,pid)=>{
+    const g=gsRef.current;
+    if(player==="p1"&&g.p1heroChosen) return;
+    if(player==="p2"&&g.p2heroChosen) return;
+    if(player==="p1")g.p1heroChosen=true;else g.p2heroChosen=true;
+    switch(pid){
+      case "goldrush": if(player==="p1")g.p1gold+=80;else g.p2gold+=80;addFloat(g,player==="p1"?W/4:3*W/4,H/2,"🛢️ Oil Boom! +80","#FFD700");break;
+      case "overclock": g.towers.filter(t=>t.owner===player).forEach(t=>{t.oc=15;});addFloat(g,player==="p1"?W/4:3*W/4,H/2,"🦅 Falcon Army!","#FFD700");break;
+      case "freeze_all": g.enemies.forEach(e=>{e.frozen=6;});addFloat(g,W/2,H/2,"🌙 Desert Night! Zzz…","#80deea");break;
+      case "fortress":{const bx=player==="p1"?2:COLS-3;[[bx,3],[bx,5],[bx,7]].forEach(([x,y])=>{if(!g.towers.find(t=>t.cx===x&&t.cy===y)&&!PATH_SET.has(`${x},${y}`))g.towers.push({id:uid(),cx:x,cy:y,type:"dune",owner:player,cd:0,x:x*CELL+CELL/2,y:y*CELL+CELL/2,oc:0});});addFloat(g,player==="p1"?W/4:3*W/4,H/2,"🏔️ Sand Dune Wall!","#e0c080");break;}
+      case "strike": g.enemies.filter(e=>e.pi>PATH.length*0.3&&e.pi<PATH.length*0.7).forEach(e=>{e.hp-=150;addFloat(g,e.x,e.y,`${SLOTH_EMOJI} Gulf Wave!`,"#80deea");});addFloat(g,W/2,H/2,"🌊 GULF WAVE!","#4fc3f7");break;
+      case "tornado": g.enemies.forEach(e=>{e.stunned=5;});addFloat(g,W/2,H/2,"🌪️ Shamal Wind!","#e0c080");break;
+    }
+    pushSnap();
+  },[pushSnap]);
+
+  return(
+    <div style={{background:"linear-gradient(180deg,#0a0500,#120a00)",minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",fontFamily:"Boogaloo,cursive",userSelect:"none",overflow:"hidden"}}>
+      <HUD snap={snap} players={players}/>
+      <div style={{position:"relative"}}>
+        <canvas ref={canvasRef} width={W} height={H} onClick={handleClick} style={{display:"block",maxWidth:"100vw",cursor:"crosshair",boxShadow:"0 0 60px #0009",border:"2px solid #1a0e00"}}/>
+        {snap.phase==="prep"&&<PrepBanner cd={snap.prepCD} wave={snap.wave} maxWave={snap.maxWave} activeTurn={snap.activeTurn} players={players}/>}
+        {snap.phase==="between"&&!snap.heroPhase&&<BetweenBanner cd={snap.betweenCD} wave={snap.wave} maxWave={snap.maxWave}/>}
+        {snap.phase==="between"&&snap.heroPhase&&<RulerPowerOverlay players={players} snap={snap} onPower={applyPower}/>}
+      </div>
+      <TowerBar snap={snap} players={players} onSelect={(p,t)=>{gsRef.current.selectedTower[p]=t;pushSnap();}}/>
+    </div>
+  );
+}
+
+// ── TICK FUNCTIONS ─────────────────────────────────────────────────────────────
+function startWave(g){
+  g.wave++;g.phase="wave";g.prepTimer=0;
+  if(g.wave>=WAVES.length) return;
+  g.spawnQueue=[];
+  WAVES[g.wave].forEach(gr=>{for(let i=0;i<gr.n;i++)g.spawnQueue.push({t:gr.t,i:gr.i});});
+  g.spawnQueue.sort(()=>Math.random()-0.5);
+  g.spawnTimer=0;
+}
+
+function tickEnemies(g,dt){
+  const done=[];
+  for(const e of g.enemies){
+    if(e.hp<=0){
+      const prog=e.pi/PATH.length;
+      if(prog<0.5)g.p1gold+=e.reward;else g.p2gold+=e.reward;
+      const msg=SNOOZE_MESSAGES[Math.floor(Math.random()*SNOOZE_MESSAGES.length)];
+      addFloat(g,e.x,e.y-10,`${SLOTH_EMOJI} ${msg}`,"#ce93d8");
+      g.floaties.push({id:uid(),x:e.x,y:e.y,text:SLOTH_EMOJI,color:"#D4A017",life:2.4,isSloth:true});
+      done.push(e.id);continue;
+    }
+    if(e.frozen>0){e.frozen-=dt;continue;}
+    if(e.stunned>0){e.stunned-=dt;continue;}
+    const spd=e.slowT>0?e.speed*0.4:e.speed;
+    if(e.slowT>0)e.slowT-=dt;
+    const tgt=PATH[Math.min(e.pi,PATH.length-1)];
+    const tx=tgt.x*CELL+CELL/2,ty=tgt.y*CELL+CELL/2;
+    const d=dist({x:e.x,y:e.y},{x:tx,y:ty});
+    if(d<spd*CELL*dt*2.5){e.pi++;if(e.pi>=PATH.length){g.p2hp-=10;addFloat(g,CASTLE_R.x*CELL+CELL/2,CASTLE_R.y*CELL+CELL/2,"😱 -10 HP!","#ef5350");done.push(e.id);}}
+    else{const a=Math.atan2(ty-e.y,tx-e.x);e.x+=Math.cos(a)*spd*CELL*dt;e.y+=Math.sin(a)*spd*CELL*dt;}
+  }
+  g.enemies=g.enemies.filter(e=>!done.includes(e.id));
+}
+
+function tickTowers(g,dt){
+  for(const t of g.towers){
+    const cfg=TOWERS[t.type];
+    if(!cfg.dmg) continue;
+    t.cd-=dt*1000;if(t.cd>0) continue;
+    if(t.oc>0)t.oc-=dt;
+    const spd=t.oc>0?cfg.speed*0.5:cfg.speed;
+    let tgt=null,md=Infinity;
+    for(const e of g.enemies){const d=dist({x:t.x,y:t.y},{x:e.x,y:e.y});if(d<=cfg.range*CELL&&d<md){md=d;tgt=e;}}
+    if(!tgt) continue;
+    t.cd=spd;
+    if(cfg.splash){
+      g.enemies.forEach(e=>{if(dist({x:t.x,y:t.y},{x:e.x,y:e.y})<=cfg.range*CELL){e.hp-=cfg.dmg;addFloat(g,e.x,e.y,"💤 Zzz!","#ce93d8");}});
+      addFloat(g,t.x,t.y,"🏜️ Poof!","#D4A017");
+    } else {
+      g.projectiles.push({id:uid(),x:t.x,y:t.y,tx:tgt.x,ty:tgt.y,tid:tgt.id,spd:360,dmg:cfg.dmg,col:cfg.color,slow:cfg.slow,chain:t.type==="falcon"?2:0,type:t.type});
+    }
+  }
+}
+
+function tickProjectiles(g,dt){
+  const done=[];
+  for(const p of g.projectiles){
+    const d=dist({x:p.x,y:p.y},{x:p.tx,y:p.ty});
+    if(d<p.spd*dt*1.5){
+      const e=g.enemies.find(e=>e.id===p.tid);
+      if(e){e.hp-=p.dmg;if(p.slow)e.slowT=2.5;addFloat(g,e.x,e.y-6,`😴 -${p.dmg}`,p.col);
+        if(p.chain>0){const others=g.enemies.filter(o=>o.id!==e.id).sort((a,b)=>dist(e,a)-dist(e,b)).slice(0,p.chain);others.forEach(o=>{o.hp-=Math.round(p.dmg*0.6);g.projectiles.push({id:uid(),x:e.x,y:e.y,tx:o.x,ty:o.y,tid:o.id,spd:500,dmg:0,col:"#FFD700",slow:0,chain:0,type:"falcon"});});addFloat(g,e.x,e.y,"🦅 Chain!","#FFD700");}}
+      done.push(p.id);
+    } else {const a=Math.atan2(p.ty-p.y,p.tx-p.x);p.x+=Math.cos(a)*p.spd*dt;p.y+=Math.sin(a)*p.spd*dt;}
+  }
+  g.projectiles=g.projectiles.filter(p=>!done.includes(p.id));
+}
+
+function addFloat(g,x,y,text,color){g.floaties.push({id:uid(),x,y,text,color,life:1.4});}
+function tickFloaties(g,dt){
+  g.floaties.forEach(f=>{f.life-=dt;f.y-=f.isSloth?16*dt:28*dt;if(f.isSloth)f.x+=Math.sin(f.life*4)*0.8;});
+  g.floaties=g.floaties.filter(f=>f.life>0);
+}
+
+// ── CANVAS DRAW ────────────────────────────────────────────────────────────────
+function draw(g,canvas,players){
+  if(!canvas) return;
+  const ctx=canvas.getContext("2d");
+  ctx.clearRect(0,0,W,H);
+
+  // Desert background grid
+  for(let x=0;x<COLS;x++) for(let y=0;y<ROWS;y++){
+    const zone=x<8?"p1":x>11?"p2":"neutral";
+    const p1em=EMIRATES[players.p1.emirate];
+    const p2em=EMIRATES[players.p2.emirate];
+    if(zone==="p1") ctx.fillStyle=`${p1em.color}18`;
+    else if(zone==="p2") ctx.fillStyle=`${p2em.color}18`;
+    else ctx.fillStyle="#D4A01710"; // free zone gold tint
+    ctx.fillRect(x*CELL,y*CELL,CELL,CELL);
+    ctx.strokeStyle="rgba(212,160,23,0.05)";
+    ctx.strokeRect(x*CELL,y*CELL,CELL,CELL);
+  }
+
+  // Sand dune texture on the path
+  PATH.forEach(p=>{
+    ctx.fillStyle="#2a1e08";
+    ctx.fillRect(p.x*CELL+2,p.y*CELL+2,CELL-4,CELL-4);
+    ctx.fillStyle="rgba(212,160,23,0.07)";
+    ctx.fillRect(p.x*CELL+4,p.y*CELL+4,CELL-8,CELL-8);
+  });
+  for(let i=3;i<PATH.length-1;i+=4){
+    const a=PATH[i],b=PATH[i+1];
+    ctx.save();ctx.translate(a.x*CELL+CELL/2,a.y*CELL+CELL/2);ctx.rotate(Math.atan2(b.y-a.y,b.x-a.x));
+    ctx.fillStyle="rgba(212,160,23,0.15)";ctx.font="12px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText("›",0,0);ctx.restore();
+  }
+
+  // Zone labels
+  ctx.save();ctx.font="bold 9px Boogaloo,sans-serif";ctx.textAlign="center";
+  const p1em=EMIRATES[players.p1.emirate];
+  const p2em=EMIRATES[players.p2.emirate];
+  ctx.fillStyle=`${p1em.color}55`;ctx.fillText(`${p1em.flag} ${p1em.name.toUpperCase()}`,4*CELL,14);
+  ctx.fillStyle="rgba(212,160,23,0.35)";ctx.fillText("🏗️ FREE ZONE",9.5*CELL,14);
+  ctx.fillStyle=`${p2em.color}55`;ctx.fillText(`${p2em.flag} ${p2em.name.toUpperCase()}`,16*CELL,14);
+  ctx.restore();
+
+  // Zone dividers — dashed desert lines
+  ctx.save();ctx.setLineDash([3,5]);
+  ctx.strokeStyle=`${p1em.color}33`;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(8*CELL,0);ctx.lineTo(8*CELL,H);ctx.stroke();
+  ctx.strokeStyle=`${p2em.color}33`;ctx.beginPath();ctx.moveTo(12*CELL,0);ctx.lineTo(12*CELL,H);ctx.stroke();
+  ctx.setLineDash([]);ctx.restore();
+
+  // Castles (mosques!)
+  drawCastle(ctx,CASTLE_L,p1em.color,g.p1hp,p1em.flag);
+  drawCastle(ctx,CASTLE_R,p2em.color,g.p2hp,p2em.flag);
+
+  // Towers
+  g.towers.forEach(t=>{
+    const cfg=TOWERS[t.type];
+    const ownEm=t.owner==="p1"?p1em:p2em;
+    ctx.save();
+    ctx.fillStyle=t.owner==="p1"?`${p1em.color}18`:`${p2em.color}18`;
+    ctx.strokeStyle=ownEm.color;ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.roundRect(t.cx*CELL+3,t.cy*CELL+3,CELL-6,CELL-6,5);ctx.fill();ctx.stroke();
+    if(t.oc>0){ctx.strokeStyle="#FFD700";ctx.lineWidth=2;ctx.globalAlpha=0.4+0.5*Math.sin(g.tick/3);ctx.beginPath();ctx.arc(t.x,t.y,CELL/2-2,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;}
+    ctx.shadowBlur=5;ctx.shadowColor=cfg.color;
+    ctx.font="18px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(cfg.emoji,t.x,t.y);
+    ctx.shadowBlur=0;ctx.restore();
+  });
+
+  // Enemies
+  g.enemies.forEach(e=>{
+    const et=ENEMY_TYPES[e.ti];
+    const hpFrac=Math.max(0,e.hp/e.maxHp);
+    ctx.save();
+    if(e.frozen>0||e.stunned>0)ctx.globalAlpha=0.6;
+    // Sleepiness bar — goes from sandy yellow → deep purple as they get sleepy
+    ctx.fillStyle="#1a1208";ctx.fillRect(e.x-14,e.y-24,28,5);
+    const sleepiness=1-hpFrac;
+    const r=Math.round(212-sleepiness*140),gC=Math.round(160-sleepiness*140),b=Math.round(23+sleepiness*160);
+    ctx.fillStyle=`rgb(${r},${gC},${b})`;
+    ctx.fillRect(e.x-14,e.y-24,28*hpFrac,5);
+    ctx.globalAlpha=1;
+    const wobble=hpFrac<0.3?Math.sin(g.tick/2)*3:0;
+    ctx.font="20px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillText(et.emoji,e.x+wobble,e.y);
+    if(e.frozen>0){ctx.font="11px sans-serif";ctx.fillText("🌙",e.x+12,e.y-10);}
+    if(e.stunned>0){ctx.font="11px sans-serif";ctx.fillText("💫",e.x+12,e.y-10);}
+    if(e.slowT>0){ctx.font="11px sans-serif";ctx.fillText("🎶",e.x-12,e.y-10);}
+    if(hpFrac<0.25){ctx.font="9px Boogaloo,sans-serif";ctx.fillStyle="#ce93d8";ctx.globalAlpha=0.8+0.2*Math.sin(g.tick/4);ctx.fillText("zzz",e.x+14,e.y-14);ctx.globalAlpha=1;}
+    ctx.restore();
+  });
+
+  // Projectiles — themed icons
+  g.projectiles.forEach(p=>{
+    ctx.save();
+    const icon=p.type==="date"?"🌴":p.type==="oud"?"🎶":p.type==="falcon"?"🦅":"⭐";
+    ctx.font="14px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillText(icon,p.x,p.y);
+    ctx.restore();
+  });
+
+  // Floaties
+  g.floaties.forEach(f=>{
+    const a=f.life/1.4;
+    ctx.save();ctx.globalAlpha=Math.min(1,a);
+    if(f.isSloth){ctx.font=`${16+Math.round((1.4-f.life)*10)}px sans-serif`;ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(f.text,f.x,f.y);}
+    else{ctx.font="bold 11px Boogaloo,sans-serif";ctx.textAlign="center";ctx.strokeStyle="#00000099";ctx.lineWidth=3;ctx.strokeText(f.text,f.x,f.y);ctx.fillStyle=f.color;ctx.fillText(f.text,f.x,f.y);}
+    ctx.restore();
+  });
+}
+
+function drawCastle(ctx,pos,color,hp,flag){
+  const x=pos.x*CELL,y=pos.y*CELL;
+  ctx.save();
+  ctx.fillStyle=color+"22";ctx.strokeStyle=color;ctx.lineWidth=2.5;
+  ctx.shadowBlur=14;ctx.shadowColor=color;
+  ctx.beginPath();ctx.roundRect(x+3,y+3,CELL-6,CELL-6,6);ctx.fill();ctx.stroke();
+  ctx.shadowBlur=0;
+  // HP bar
+  ctx.fillStyle="#1a0e00";ctx.fillRect(x+4,y+CELL-10,CELL-8,6);
+  ctx.fillStyle=hp>60?"#007A3D":hp>30?"#D4A017":"#C8102E";
+  ctx.fillRect(x+4,y+CELL-10,(CELL-8)*Math.max(0,hp/100),6);
+  // Emirate flag emoji as icon
+  ctx.font="20px sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillText(flag,x+CELL/2,y+CELL/2);
+  ctx.restore();
+}
+
+// ── HUD ────────────────────────────────────────────────────────────────────────
+function HUD({snap,players}){
+  const hc=hp=>hp>60?"#007A3D":hp>30?"#D4A017":"#C8102E";
+  const p1em=EMIRATES[players.p1.emirate];
+  const p2em=EMIRATES[players.p2.emirate];
+  return(
+    <div style={{width:"100%",maxWidth:W,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"6px 12px",boxSizing:"border-box",background:"#080500",borderBottom:"1px solid #2a1a00",gap:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flex:1}}>
+        <span style={{fontSize:22}}>{p1em.flag}</span>
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:p1em.color,letterSpacing:1}}>{players.p1.name} · {p1em.name}</div>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <div style={{width:70,height:7,background:"#1a1000",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${snap.p1hp}%`,background:hc(snap.p1hp),borderRadius:4,transition:"width 0.3s"}}/></div>
+            <span style={{fontSize:10,color:hc(snap.p1hp)}}>{snap.p1hp}HP</span>
+            <span style={{fontSize:10,color:"#D4A017"}}>🛢️{snap.p1gold}</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{textAlign:"center",flex:1}}>
+        <div style={{fontSize:9,color:"#3a2a00",textTransform:"uppercase",letterSpacing:2}}>
+          {snap.phase==="prep"?"بناء الأبراج ☀️":snap.phase==="between"&&!snap.heroPhase?"نامت 🐫":snap.heroPhase?"قوة الحاكم 🦅":"الحملة 🐪"}
+        </div>
+        <div style={{fontSize:14,fontWeight:900,color:"#D4A017",letterSpacing:2}}>{snap.wave>0?`موجة ${Math.min(snap.wave,snap.maxWave)}/${snap.maxWave}`:"استعد!"}</div>
+        <div style={{fontSize:9,color:"#3a2a00"}}>{snap.phase==="prep"?`Starts in ${snap.prepCD}s`:snap.phase==="between"&&!snap.heroPhase?`Next critters in ${snap.betweenCD}s`:snap.heroPhase?"Pick your Ruler Power!":"Snoozify the critters!"}</div>
+      </div>
+
+      <div style={{display:"flex",alignItems:"center",gap:8,flex:1,justifyContent:"flex-end"}}>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:11,fontWeight:700,color:p2em.color,letterSpacing:1}}>{players.p2.name} · {p2em.name}</div>
+          <div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"flex-end"}}>
+            <span style={{fontSize:10,color:"#D4A017"}}>🛢️{snap.p2gold}</span>
+            <span style={{fontSize:10,color:hc(snap.p2hp)}}>{snap.p2hp}HP</span>
+            <div style={{width:70,height:7,background:"#1a1000",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${snap.p2hp}%`,background:hc(snap.p2hp),borderRadius:4,transition:"width 0.3s"}}/></div>
+          </div>
+        </div>
+        <span style={{fontSize:22}}>{p2em.flag}</span>
+      </div>
+    </div>
+  );
+}
+
+function PrepBanner({cd,wave,maxWave,activeTurn,players}){
+  const em=EMIRATES[players[activeTurn].emirate];
+  return(
+    <div style={{position:"absolute",top:0,left:0,right:0,background:"linear-gradient(180deg,rgba(212,160,23,0.18),transparent)",padding:"10px",pointerEvents:"none",borderBottom:"1px solid rgba(212,160,23,0.2)"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:14,fontWeight:900,color:"#D4A017",letterSpacing:2}}>🌴 WAVE {Math.min(wave,maxWave)}/{maxWave} — Build your towers! ({cd}s)</div>
+        <div style={{fontSize:11,color:em.color,marginTop:2}}>{em.flag} {players[activeTurn].name}'s turn — yalla build!</div>
+      </div>
+    </div>
+  );
+}
+
+function BetweenBanner({cd,wave,maxWave}){
+  return(
+    <div style={{position:"absolute",top:0,left:0,right:0,background:"linear-gradient(180deg,rgba(0,122,61,0.15),transparent)",padding:"10px",pointerEvents:"none",borderBottom:"1px solid rgba(0,122,61,0.2)"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:14,fontWeight:900,color:"#007A3D",letterSpacing:2}}>🐫 Wave {Math.min(wave,maxWave)} snoozified! Next critters in {cd}s</div>
+        <div style={{fontSize:11,color:"#886600",marginTop:2}}>Build more towers while the critters nap! 💤 Inshallah!</div>
+      </div>
+    </div>
+  );
+}
+
+function RulerPowerOverlay({players,snap,onPower}){
+  return(
+    <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.9)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}}>
+      <div style={{fontSize:10,color:"#D4A017",letterSpacing:5,marginBottom:4}}>قوة الحاكم</div>
+      <div style={{fontSize:24,fontWeight:900,color:"#FFD700",letterSpacing:3,marginBottom:4}}>🦅 RULER POWER TIME! 🦅</div>
+      <div style={{fontSize:11,color:"#555",marginBottom:24}}>Each ruler picks a special power to snoozify critters! ({Math.ceil(snap.betweenCD)}s)</div>
+      <div style={{display:"flex",gap:28,flexWrap:"wrap",justifyContent:"center"}}>
+        {[["p1",players.p1,snap.p1heroChosen],["p2",players.p2,snap.p2heroChosen]].map(([pid,pl,chosen])=>{
+          const em=EMIRATES[pl.emirate];
+          return(
+            <div key={pid} style={{textAlign:"center",minWidth:200}}>
+              <div style={{fontSize:24,marginBottom:4}}>{em.flag}</div>
+              <div style={{fontSize:12,fontWeight:700,color:em.color,marginBottom:10,letterSpacing:2}}>{pl.name} · {em.name}</div>
+              {chosen?(
+                <div style={{background:`${em.color}22`,border:`2px solid ${em.color}44`,borderRadius:14,padding:"18px 28px",color:em.color,fontSize:14,fontWeight:700}}>✅ Yalla! Power chosen!</div>
+              ):(
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  {RULER_POWERS.map(rp=>(
+                    <button key={rp.id} onClick={()=>onPower(pid,rp.id)} style={{background:`${em.color}15`,border:`1px solid ${em.color}33`,borderRadius:10,padding:"7px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:8,textAlign:"left",color:"#fff",fontFamily:"Boogaloo,cursive",transition:"background 0.15s"}}
+                      onMouseEnter={e=>e.currentTarget.style.background=`${em.color}30`}
+                      onMouseLeave={e=>e.currentTarget.style.background=`${em.color}15`}
+                    >
+                      <span style={{fontSize:18}}>{rp.emoji}</span>
+                      <div><div style={{fontSize:11,fontWeight:700,color:em.color}}>{rp.name}</div><div style={{fontSize:10,color:"#666"}}>{rp.desc}</div></div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TowerBar({snap,players,onSelect}){
+  const p=snap.activeTurn;
+  const pl=players[p];
+  const em=EMIRATES[pl.emirate];
+  const gold=p==="p1"?snap.p1gold:snap.p2gold;
+  return(
+    <div style={{width:"100%",maxWidth:W,background:"#080500",borderTop:"1px solid #2a1a00",padding:"7px 12px",boxSizing:"border-box"}}>
+      <div style={{textAlign:"center",marginBottom:5,fontSize:11,fontWeight:700,color:em.color,letterSpacing:2}}>{em.flag} {pl.name} ({em.name}) — Click map to place</div>
+      <div style={{display:"flex",gap:6,justifyContent:"center",flexWrap:"wrap"}}>
+        {Object.entries(TOWERS).map(([k,cfg])=>{
+          const sel=snap.selectedTower[p]===k;
+          const ok=gold>=cfg.cost;
+          return(
+            <button key={k} onClick={()=>onSelect(p,k)} style={{background:sel?`${cfg.color}25`:"rgba(255,255,255,0.03)",border:`2px solid ${sel?cfg.color:ok?"rgba(212,160,23,0.15)":"rgba(255,255,255,0.03)"}`,borderRadius:10,padding:"5px 10px",cursor:ok?"pointer":"not-allowed",textAlign:"center",minWidth:66,opacity:ok?1:0.3,boxShadow:sel?`0 0 10px ${cfg.color}55`:"none",transition:"all 0.12s"}}>
+              <div style={{fontSize:18}}>{cfg.emoji}</div>
+              <div style={{fontSize:9,color:sel?cfg.color:"#664400",fontWeight:700}}>{cfg.name}</div>
+              <div style={{fontSize:9,color:"#D4A017"}}>🛢️{cfg.cost}</div>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{textAlign:"center",marginTop:4,fontSize:9,color:"#1a1000"}}>
+        {EMIRATES[players.p1.emirate].flag} builds left · 🏗️ FREE ZONE (both build) · {EMIRATES[players.p2.emirate].flag} builds right · Yalla snoozify! 🐫
+      </div>
+    </div>
+  );
+}
+
+// ─── RESULTS ──────────────────────────────────────────────────────────────────
+function Results({result,players,onRematch,onMenu}){
+  const [t,setT]=useState(0);
+  useEffect(()=>{const id=setInterval(()=>setT(x=>x+1),80);return()=>clearInterval(id);},[]);
+  const isP1Win=result?.winner==="p1";
+  const w=isP1Win?players.p1:players.p2;
+  const l=isP1Win?players.p2:players.p1;
+  const wem=EMIRATES[w.emirate];
+  const lem=EMIRATES[l.emirate];
+  const wHp=isP1Win?result?.p1hp:result?.p2hp;
+  const lHp=isP1Win?result?.p2hp:result?.p1hp;
+
+  return(
+    <div style={{minHeight:"100vh",background:"linear-gradient(180deg,#0a0500,#1a0e00)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"Boogaloo,cursive",color:"#fff",padding:20,position:"relative",overflow:"hidden"}}>
+      {/* Confetti — UAE colors */}
+      {Array.from({length:20},(_,i)=>(
+        <div key={i} style={{position:"fixed",left:`${(i*7+t*1.5)%100}%`,top:`${(t*1.2+i*22)%115-10}%`,fontSize:18,pointerEvents:"none",opacity:0.7,transform:`rotate(${t*4+i*18}deg)`}}>{["🌙","⭐","🦅","🌴","🛢️","🕌"][i%6]}</div>
+      ))}
+
+      {/* UAE flag strip */}
+      <div style={{display:"flex",gap:0,marginBottom:24,borderRadius:8,overflow:"hidden",width:200,height:8,boxShadow:"0 2px 12px #0008"}}>
+        <div style={{flex:1,background:"#C8102E"}}/><div style={{flex:1,background:"#fff"}}/><div style={{flex:1,background:"#000"}}/><div style={{width:50,background:"#007A3D"}}/>
+      </div>
+
+      <div style={{fontSize:11,color:"#4a3000",letterSpacing:4,marginBottom:10,textTransform:"uppercase"}}>🏆 Battle Complete — انتهت المعركة</div>
+      <div style={{fontSize:60,filter:`drop-shadow(0 0 28px ${wem.color})`,transform:`scale(${1+Math.sin(t/12)*0.05})`,marginBottom:4}}>{wem.flag}</div>
+      <div style={{fontSize:32,fontWeight:900,letterSpacing:3,background:`linear-gradient(135deg,${wem.color},#FFD700)`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",marginBottom:2,textAlign:"center"}}>{w.name} Wins!</div>
+      <div style={{fontSize:13,color:"#D4A017",marginBottom:6}}>{wem.name} · {wem.desc}</div>
+      <div style={{fontSize:12,color:"#664400",marginBottom:32}}>🐫 Grand Snoozification Master of the UAE!</div>
+
+      {/* Score cards */}
+      <div style={{display:"flex",gap:28,marginBottom:40,background:"rgba(212,160,23,0.06)",borderRadius:16,padding:"18px 28px",border:"1px solid rgba(212,160,23,0.12)"}}>
+        {[[w,wem,wHp,"🥇 Ruler Champion!"],[l,lem,lHp,"🐫 Yalla, try again!"]].map(([pl,em,hp,badge])=>(
+          <div key={pl.name} style={{textAlign:"center"}}>
+            <div style={{fontSize:36,marginBottom:4}}>{em.flag}</div>
+            <div style={{fontSize:11,fontWeight:700,color:em.color,letterSpacing:1}}>{pl.name}</div>
+            <div style={{fontSize:10,color:"#444",marginBottom:4}}>{em.name}</div>
+            <div style={{fontSize:22,fontWeight:900,color:hp>0?"#007A3D":"#C8102E",marginTop:4}}>{Math.max(0,hp)} HP</div>
+            <div style={{fontSize:10,color:"#555",marginTop:2}}>{badge}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{display:"flex",gap:14}}>
+        <button onClick={onRematch} style={{background:"linear-gradient(135deg,#C8102E,#FFD700)",border:"none",borderRadius:14,padding:"14px 44px",fontSize:16,fontWeight:900,cursor:"pointer",color:"#000",letterSpacing:2,boxShadow:"0 6px 30px #C8102E55",fontFamily:"Boogaloo,cursive"}}>🔄 يلا! REMATCH</button>
+        <button onClick={onMenu} style={{background:"rgba(212,160,23,0.08)",border:"1px solid rgba(212,160,23,0.2)",borderRadius:14,padding:"14px 44px",fontSize:16,fontWeight:700,cursor:"pointer",color:"#D4A017",letterSpacing:2,fontFamily:"Boogaloo,cursive"}}>🕌 MAIN MENU</button>
+      </div>
+    </div>
+  );
+}
